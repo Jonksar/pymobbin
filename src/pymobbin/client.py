@@ -5,8 +5,8 @@ from typing import Optional, Any, List, TYPE_CHECKING
 import httpx
 import msgspec
 
-from pymobbin.constants import BASE_URL, ANON_KEY, ORIGIN, REFERER, USER_AGENT
-from pymobbin.models import Token, UserInfo, AuthResponse, App, Collection, Workspace
+from pymobbin.constants import BASE_URL, WEB_API_URL, ANON_KEY, ORIGIN, REFERER, USER_AGENT
+from pymobbin.models import Token, UserInfo, AuthResponse, App, WebApp, Collection, Workspace
 
 if TYPE_CHECKING:
     import polars as pl
@@ -23,6 +23,8 @@ class MobbinClient:
             cookie: Optional 'sb-...' cookie string containing the token.
         """
         self.token: Optional[Token] = None
+        self.cookie_string: Optional[str] = cookie
+        
         if access_token:
             self.token = Token(access_token=access_token, refresh_token="")
         elif cookie:
@@ -36,10 +38,12 @@ class MobbinClient:
                 
         self.user_info: Optional[UserInfo] = None
         self.client = httpx.AsyncClient(base_url=BASE_URL)
+        self.web_client = httpx.AsyncClient(base_url=WEB_API_URL)
 
     async def close(self):
         """Close the underlying HTTP client."""
         await self.client.aclose()
+        await self.web_client.aclose()
 
     async def __aenter__(self):
         return self
@@ -71,6 +75,23 @@ class MobbinClient:
             # But the server requires 'apikey' header matching the project anon key.
         else:
             headers["Authorization"] = f"Bearer {ANON_KEY}"
+            
+        return headers
+
+    def _web_headers(self) -> dict[str, str]:
+        """Generate headers for Web API requests."""
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/json",
+            "Referer": f"{ORIGIN}/discover/apps/web/top",
+            "User-Agent": USER_AGENT,
+            "sec-ch-ua": '"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"macOS"',
+        }
+        
+        if self.cookie_string:
+            headers["Cookie"] = self.cookie_string
             
         return headers
 
@@ -188,55 +209,43 @@ class MobbinClient:
 
         return all_apps
 
-    async def get_web_apps(self, limit: int = 24) -> List[App]:
-        """Fetch Web apps."""
-        url = "/rest/v1/rpc/get_apps_with_preview_screens_filter"
-        headers = self._headers(authenticated=True)
-        headers["Content-Profile"] = "public"
+    async def get_web_apps(self, limit: int = 24) -> List[WebApp]:
+        """Fetch Web apps using the new Web API."""
+        url = "/api/content/fetch-apps"
+        headers = self._web_headers()
         
         all_apps = []
-        last_app_id = None
-        last_app_version_updated_at = None
+        page_size = min(24, limit) if limit else 24
         
-        page_size = 24
-        
-        while True:
-            body = {
-                "filterAppCategories": None,
-                "filterAppCompanyStages": None,
-                "filterAppPlatform": "web",
+        body = {
+            "searchRequestId": "",
+            "filterOptions": {
                 "filterOperator": "and",
-                "lastAppVersionUpdatedAt": last_app_version_updated_at,
-                "filterAppStyles": None,
-                "filterAppRegions": None,
+                "platform": "web",
+                "appCategories": None,
+                "shouldHideNonIdealApps": True
+            },
+            "paginationOptions": {
                 "pageSize": page_size,
-                "lastAppId": last_app_id,
-                "lastAppVersionPublishedAt": None
+                "sortBy": "publishedAt"
             }
+        }
+        
+        response = await self.web_client.post(url, headers=headers, json=body)
+        response.raise_for_status()
+        
+        data = msgspec.json.decode(response.content)
+        
+        # Response structure: {"value": {"searchRequestId": "...", "data": [...]}}
+        if isinstance(data, dict) and "value" in data:
+            value = data["value"]
+            if isinstance(value, dict) and "data" in value:
+                apps = msgspec.convert(value["data"], List[WebApp])
+                all_apps.extend(apps)
+        
+        if limit:
+            all_apps = all_apps[:limit]
             
-            if all_apps:
-                last_app = all_apps[-1]
-                body["lastAppVersionPublishedAt"] = last_app.app_version_published_at
-            else:
-                body["lastAppVersionPublishedAt"] = None
-
-            response = await self.client.post(url, headers=headers, json=body)
-            response.raise_for_status()
-            
-            apps = msgspec.json.decode(response.content, type=List[App])
-            if not apps:
-                break
-                
-            all_apps.extend(apps)
-            
-            if limit and len(all_apps) >= limit:
-                all_apps = all_apps[:limit]
-                break
-                
-            last_app = apps[-1]
-            last_app_id = last_app.id
-            last_app_version_updated_at = last_app.app_version_updated_at
-
         return all_apps
 
     async def get_web_apps_df(self, limit: int = 24) -> "pl.DataFrame":

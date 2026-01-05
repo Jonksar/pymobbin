@@ -85,6 +85,25 @@ class App(msgspec.Struct, rename="camel"):
     preview_screen_urls: List[str]
     app_style: Optional[str] = None
 
+class WebApp(msgspec.Struct, rename="camel"):
+    """A Web app from the new Web API."""
+    id: str
+    app_name: str
+    app_category: str
+    app_logo_url: str
+    app_tagline: str
+    platform: str
+    created_at: str
+    app_version_id: str
+    keywords: List[str] = []
+    company_hq_region: Optional[str] = None
+    company_stage: Optional[str] = None
+    app_version_created_at: Optional[str] = None
+    app_version_updated_at: Optional[str] = None
+    app_version_published_at: Optional[str] = None
+    preview_screen_urls: List[str] = []
+    app_style: Optional[str] = None
+
 class CollectionApp(msgspec.Struct, rename="camel"):
     """An app within a collection."""
     id: str
